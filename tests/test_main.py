@@ -26,9 +26,18 @@ def auth_headers():
 
 @pytest.fixture(autouse=True)
 def override_vector_store(monkeypatch):
-    from app.config import vector_store
+    import app.config as config
     from app.services.vector_store.async_pg_vector import AsyncPgVector
     from app.routes import document_routes
+
+    # When TESTING=1, config.vector_store is None. Replace with a dummy so tests have embedding_function etc.
+    if config.vector_store is None:
+        from tests.conftest import DummyVectorStore, DummyEmbedding
+        _dummy = DummyVectorStore()
+        _dummy.embedding_function = DummyEmbedding()
+        monkeypatch.setattr(config, "vector_store", _dummy)
+        monkeypatch.setattr(document_routes, "vector_store", _dummy)
+    vector_store = config.vector_store
 
     # Clear the LRU cache and patch the cached function to return dummy embeddings
     document_routes.get_cached_query_embedding.cache_clear()

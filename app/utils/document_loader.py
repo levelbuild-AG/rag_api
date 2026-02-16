@@ -9,7 +9,15 @@ import chardet
 
 from langchain_core.documents import Document
 
-from app.config import known_source_ext, PDF_EXTRACT_IMAGES, CHUNK_OVERLAP, logger
+from app.config import (
+    known_source_ext,
+    PDF_EXTRACT_IMAGES,
+    CHUNK_OVERLAP,
+    logger,
+    OCR_PDF_SERVICE_URL,
+    OCR_MAX_PDF_BYTES,
+    SCANNED_PDF_OCR_REQUIRED_CHARS,
+)
 from langchain_community.document_loaders import (
     TextLoader,
     PyPDFLoader,
@@ -22,6 +30,9 @@ from langchain_community.document_loaders import (
     UnstructuredExcelLoader,
     UnstructuredPowerPointLoader,
 )
+from app.utils.email_loader import EmailLoader
+from app.utils.msg_loader import MsgLoader
+from app.utils.ocr_pdf_service import make_pdf_searchable_from_path
 
 
 def detect_file_encoding(filepath: str) -> str:
@@ -69,7 +80,7 @@ def cleanup_temp_encoding_file(loader) -> None:
 
 
 def get_loader(filename: str, file_content_type: str, filepath: str):
-    """Get the appropriate document loader based on file type and\or content type."""
+    """Get the appropriate document loader based on file type and/or content type."""
     file_ext = filename.split(".")[-1].lower()
     known_type = True
 
@@ -142,6 +153,10 @@ def get_loader(filename: str, file_content_type: str, filepath: str):
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ]:
         loader = UnstructuredExcelLoader(filepath)
+    elif file_ext == "msg" or file_content_type == "application/vnd.ms-outlook":
+        loader = MsgLoader(filepath)
+    elif file_ext == "eml" or file_content_type == "message/rfc822":
+        loader = EmailLoader(filepath)
     elif file_ext == "json" or file_content_type == "application/json":
         loader = TextLoader(filepath, autodetect_encoding=True)
     elif file_ext in known_source_ext or (
@@ -221,6 +236,7 @@ class SafePyPDFLoader:
     """
     A wrapper around PyPDFLoader that handles image extraction failures gracefully.
     Falls back to text-only extraction when image extraction fails.
+    Also includes OCR fallback for scanned PDFs via Cloud Run service.
 
     This is a workaround for issues with PyPDFLoader that can occur when extracting images
     from PDFs, which can lead to KeyError exceptions if the PDF is malformed or has unsupported
@@ -236,18 +252,96 @@ class SafePyPDFLoader:
         self._temp_filepath = None  # For compatibility with cleanup function
 
     def load(self) -> List[Document]:
-        """Load PDF documents with automatic fallback on image extraction errors."""
+        """Load PDF documents with automatic fallback on image extraction errors and OCR for scanned PDFs."""
         loader = PyPDFLoader(self.filepath, extract_images=self.extract_images)
 
         try:
-            return loader.load()
+            documents = loader.load()
         except KeyError as e:
             if "/Filter" in str(e) and self.extract_images:
                 logger.warning(
                     f"PDF image extraction failed for {self.filepath}, falling back to text-only: {e}"
                 )
                 fallback_loader = PyPDFLoader(self.filepath, extract_images=False)
-                return fallback_loader.load()
+                documents = fallback_loader.load()
             else:
                 # Re-raise if it's a different error
                 raise
+
+        # Scanned detection: if extracted text < threshold chars, PDF is scanned → OCR mandatory
+        total_text_length = sum(len(doc.page_content.strip()) for doc in documents)
+
+        if total_text_length >= SCANNED_PDF_OCR_REQUIRED_CHARS:
+            # Not scanned: return as-is (no OCR), regardless of size
+            return documents
+
+        # Scanned PDF: OCR is mandatory; no fallback to original documents
+        logger.info(
+            f"PDF {self.filepath} has low text content ({total_text_length} chars < {SCANNED_PDF_OCR_REQUIRED_CHARS}), "
+            "OCR required"
+        )
+
+        if not OCR_PDF_SERVICE_URL:
+            logger.error("OCR_REQUIRED_URL_MISSING OCR required but OCR_PDF_SERVICE_URL not configured")
+            raise ValueError(
+                "OCR required for scanned PDF but OCR service URL is not configured (OCR_REQUIRED_URL_MISSING)"
+            )
+
+        original_filename = os.path.basename(self.filepath)
+
+        # Log file size for monitoring (but don't skip OCR for large files)
+        file_size = os.path.getsize(self.filepath)
+        if file_size > OCR_MAX_PDF_BYTES:
+            logger.warning(
+                f"Large PDF detected: {file_size} bytes (limit {OCR_MAX_PDF_BYTES}). "
+                "Proceeding with OCR via multipart upload."
+            )
+
+        # Call OCR service with path-based multipart (streams file, no base64 in memory)
+        try:
+            searchable_pdf_bytes = make_pdf_searchable_from_path(self.filepath, original_filename)
+        except ValueError as ocr_error:
+            # OCR client already raised with OCR_REQUIRED_SERVICE_FAILED token
+            logger.error(
+                f"OCR_REQUIRED_SERVICE_FAILED OCR required but failed for {self.filepath}: {ocr_error}"
+            )
+            raise
+
+        if not searchable_pdf_bytes:
+            logger.error(
+                "OCR_REQUIRED_SERVICE_FAILED OCR required but service returned no searchable PDF for %s",
+                self.filepath,
+            )
+            raise ValueError(
+                f"OCR required for scanned PDF but OCR service failed or returned no output (OCR_REQUIRED_SERVICE_FAILED): {self.filepath}"
+            )
+
+        # Write searchable PDF to temp file; always delete in finally
+        temp_file = tempfile.NamedTemporaryFile(
+            mode="wb", suffix="_searchable.pdf", delete=False
+        )
+        temp_filepath = temp_file.name
+        try:
+            temp_file.write(searchable_pdf_bytes)
+            temp_file.close()
+        except Exception:
+            try:
+                os.unlink(temp_filepath)
+            except Exception:
+                pass
+            raise
+        try:
+            searchable_loader = PyPDFLoader(
+                temp_filepath, extract_images=self.extract_images
+            )
+            ocr_documents = searchable_loader.load()
+            logger.info(
+                f"Successfully processed scanned PDF via OCR: {self.filepath} "
+                f"({len(ocr_documents)} pages)"
+            )
+            return ocr_documents
+        finally:
+            try:
+                os.unlink(temp_filepath)
+            except Exception:
+                pass

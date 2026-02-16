@@ -1,4 +1,4 @@
-﻿# ID-based RAG FastAPI
+# ID-based RAG FastAPI
 
 ## Overview
 This project integrates Langchain with FastAPI in an Asynchronous, Scalable manner, providing a framework for document indexing and retrieval, using PostgreSQL/pgvector.
@@ -38,6 +38,7 @@ uvicorn main:app
 
 To do a clean reinstall of all dependencies (e.g., after updating `requirements.txt`):
 
+**Linux/macOS:**
 ```bash
 # Remove existing virtual environment and recreate it
 rm -rf venv
@@ -45,6 +46,45 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+**Windows PowerShell:**
+```powershell
+# Remove existing virtual environment and recreate it
+Remove-Item -Recurse -Force .venv -ErrorAction SilentlyContinue
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### Run tests locally
+
+**Prerequisites:** Create a dedicated venv for rag_api tests.
+
+**Linux/macOS:**
+```bash
+cd infra/rag_api
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -r test_requirements.txt  # Install pytest, pytest-mock, etc.
+pytest -q  # Quick test run
+pytest tests/utils/test_document_loader.py -v  # Document loader tests
+pytest tests/utils/test_ocr_pdf_service.py -v  # OCR client tests
+```
+
+**Windows PowerShell:**
+```powershell
+cd infra/rag_api
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -r test_requirements.txt  # Install pytest, pytest-mock, etc.
+pytest -q  # Quick test run
+pytest tests/utils/test_document_loader.py -v  # Document loader tests
+pytest tests/utils/test_ocr_pdf_service.py -v  # OCR client tests
+```
+
+**Note:** Some tests may require external services (e.g., database, OCR service). These are mocked in unit tests. Integration tests that require real services are marked and can be skipped with `pytest -m "not integration"`.
 
 For the lite version (without sentence_transformers/huggingface):
 
@@ -90,6 +130,11 @@ The following environment variables are required to run the application:
 - `EMBEDDING_MAX_QUEUE_SIZE`: (Optional) Maximum number of batches to buffer in memory during async processing. Default value is "3".
 - `RAG_UPLOAD_DIR`: (Optional) The directory where uploaded files are stored. Default value is "./uploads/".
 - `PDF_EXTRACT_IMAGES`: (Optional) A boolean value indicating whether to extract images from PDF files. Default value is "False".
+- `OCR_PDF_SERVICE_URL`: (Required for scanned PDFs) URL of Cloud Run OCR service. If a PDF is detected as scanned (< 25 chars extracted), OCR is mandatory and ingestion fails if this is not set. Example: `https://ocr-service-xxx.run.app`
+- `OCR_PDF_TIMEOUT_SECONDS`: (Optional) Timeout in seconds for OCR service calls. Default value is "60".
+- `OCR_MAX_PDF_BYTES`: (Optional) When OCR is required, PDFs larger than this (bytes) cause ingestion to fail. Default 25 MB (26214400).
+- `SCANNED_PDF_OCR_REQUIRED_CHARS`: (Optional) If extracted PDF text has fewer than this many characters, the PDF is treated as scanned and OCR is mandatory. Default value is "25".
+- `SCANNED_PDF_CHAR_THRESHOLD`: (Optional, legacy) Character count threshold. Prefer `SCANNED_PDF_OCR_REQUIRED_CHARS` for the OCR-required rule. Default value is "300".
 - `DEBUG_RAG_API`: (Optional) Set to "True" to show more verbose logging output in the server console, and to enable postgresql database routes
 - `DEBUG_PGVECTOR_QUERIES`: (Optional) Set to "True" to enable detailed PostgreSQL query logging for pgvector operations. Useful for debugging performance issues with vector database queries.
 - `CONSOLE_JSON`: (Optional) Set to "True" to log as json for Cloud Logging aggregations

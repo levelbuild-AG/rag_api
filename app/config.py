@@ -89,6 +89,22 @@ EMBEDDING_MAX_QUEUE_SIZE = int(get_env_variable("EMBEDDING_MAX_QUEUE_SIZE", "3")
 env_value = get_env_variable("PDF_EXTRACT_IMAGES", "False").lower()
 PDF_EXTRACT_IMAGES = True if env_value == "true" else False
 
+# OCR PDF service configuration
+OCR_PDF_SERVICE_URL = get_env_variable("OCR_PDF_SERVICE_URL", None)
+OCR_PDF_TIMEOUT_SECONDS = int(get_env_variable("OCR_PDF_TIMEOUT_SECONDS", "120"))
+# Max PDF size (bytes) when OCR is required; over this we fail loudly (env optional)
+OCR_MAX_PDF_BYTES = int(
+    get_env_variable("OCR_MAX_PDF_BYTES", str(25 * 1024 * 1024))
+)
+# If extracted PDF text has fewer than this many chars, PDF is treated as scanned and OCR is mandatory
+SCANNED_PDF_OCR_REQUIRED_CHARS = int(
+    get_env_variable("SCANNED_PDF_OCR_REQUIRED_CHARS", "25")
+)
+# Legacy; prefer SCANNED_PDF_OCR_REQUIRED_CHARS for OCR-required rule
+SCANNED_PDF_CHAR_THRESHOLD = int(
+    get_env_variable("SCANNED_PDF_CHAR_THRESHOLD", "300")
+)
+
 if POSTGRES_USE_UNIX_SOCKET:
     connection_suffix = f"{urllib.parse.quote_plus(POSTGRES_USER)}:{urllib.parse.quote_plus(POSTGRES_PASSWORD)}@/{urllib.parse.quote_plus(POSTGRES_DB)}?host={urllib.parse.quote_plus(DB_HOST)}"
 else:
@@ -318,37 +334,44 @@ elif EMBEDDINGS_PROVIDER == EmbeddingsProvider.BEDROCK:
 else:
     raise ValueError(f"Unsupported embeddings provider: {EMBEDDINGS_PROVIDER}")
 
-embeddings = init_embeddings(EMBEDDINGS_PROVIDER, EMBEDDINGS_MODEL)
-
-logger.info(f"Initialized embeddings of type: {type(embeddings)}")
-
-# Vector store
-if VECTOR_DB_TYPE == VectorDBType.PGVECTOR:
-    vector_store = get_vector_store(
-        connection_string=CONNECTION_STRING,
-        embeddings=embeddings,
-        collection_name=COLLECTION_NAME,
-        mode="async",
-    )
-elif VECTOR_DB_TYPE == VectorDBType.ATLAS_MONGO:
-    # Backward compatability check
-    if MONGO_VECTOR_COLLECTION:
-        logger.info(
-            f"DEPRECATED: Please remove env var MONGO_VECTOR_COLLECTION and instead use COLLECTION_NAME and ATLAS_SEARCH_INDEX. You can set both as same, but not neccessary. See README for more information."
-        )
-        ATLAS_SEARCH_INDEX = MONGO_VECTOR_COLLECTION
-        COLLECTION_NAME = MONGO_VECTOR_COLLECTION
-    vector_store = get_vector_store(
-        connection_string=ATLAS_MONGO_DB_URI,
-        embeddings=embeddings,
-        collection_name=COLLECTION_NAME,
-        mode="atlas-mongo",
-        search_index=ATLAS_SEARCH_INDEX,
-    )
+# When TESTING=1 (e.g. pytest), skip embeddings and vector_store init to avoid
+# Vertex AI / DB connection attempts that block or fail in test env.
+if os.getenv("TESTING") == "1":
+    embeddings = None
+    vector_store = None
+    retriever = None
+    logger.info("TESTING=1: skipped embeddings and vector_store init")
 else:
-    raise ValueError(f"Unsupported vector store type: {VECTOR_DB_TYPE}")
+    embeddings = init_embeddings(EMBEDDINGS_PROVIDER, EMBEDDINGS_MODEL)
+    logger.info(f"Initialized embeddings of type: {type(embeddings)}")
 
-retriever = vector_store.as_retriever()
+    # Vector store
+    if VECTOR_DB_TYPE == VectorDBType.PGVECTOR:
+        vector_store = get_vector_store(
+            connection_string=CONNECTION_STRING,
+            embeddings=embeddings,
+            collection_name=COLLECTION_NAME,
+            mode="async",
+        )
+    elif VECTOR_DB_TYPE == VectorDBType.ATLAS_MONGO:
+        # Backward compatability check
+        if MONGO_VECTOR_COLLECTION:
+            logger.info(
+                f"DEPRECATED: Please remove env var MONGO_VECTOR_COLLECTION and instead use COLLECTION_NAME and ATLAS_SEARCH_INDEX. You can set both as same, but not neccessary. See README for more information."
+            )
+            ATLAS_SEARCH_INDEX = MONGO_VECTOR_COLLECTION
+            COLLECTION_NAME = MONGO_VECTOR_COLLECTION
+        vector_store = get_vector_store(
+            connection_string=ATLAS_MONGO_DB_URI,
+            embeddings=embeddings,
+            collection_name=COLLECTION_NAME,
+            mode="atlas-mongo",
+            search_index=ATLAS_SEARCH_INDEX,
+        )
+    else:
+        raise ValueError(f"Unsupported vector store type: {VECTOR_DB_TYPE}")
+
+    retriever = vector_store.as_retriever()
 
 known_source_ext = [
     "go",
@@ -395,7 +418,6 @@ known_source_ext = [
     "svelte",
     "yml",
     "yaml",
-    "eml",
     "ex",
     "exs",
     "erl",
