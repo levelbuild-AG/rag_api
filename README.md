@@ -122,6 +122,8 @@ The following environment variables are required to run the application:
 - `JWT_SECRET`: (Optional) The secret key used for verifying JWT tokens for requests.
   - The secret is only used for verification. This basic approach assumes a signed JWT from elsewhere.
   - Omit to run API without requiring authentication
+- `SYSTEM_MONGO_URI`: (Required for multi-tenant) System MongoDB URI where the LibreChat `tenants` collection lives. Used to resolve tenant RAG config (postgresUri, vectorDbType) per request.
+- `RAG_INTERNAL_AUTH_SECRET`: (Optional, min 16 chars) Shared secret for internal cache invalidation. When set, LibreChat API can call `POST /internal/cache/invalidate` with header `X-Internal-Auth` to invalidate tenant RAG cache after config updates. Must match `RAG_INTERNAL_AUTH_SECRET` (or `INTERNAL_AUTH_SECRET`) on the LibreChat API side.
 
 - `COLLECTION_NAME`: (Optional) The name of the collection in the vector store. Default value is "testcollection".
 - `CHUNK_SIZE`: (Optional) The size of the chunks for text processing. Default value is "1500".
