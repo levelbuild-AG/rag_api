@@ -28,6 +28,7 @@ class EmbeddingsProvider(Enum):
     BEDROCK = "bedrock"
     GOOGLE_GENAI = "google_genai"
     GOOGLE_VERTEXAI = "vertexai"
+    FAKE = "fake"
 
 
 def get_env_variable(
@@ -296,13 +297,39 @@ def init_embeddings(provider, model):
             model_id=model,
             region_name=AWS_DEFAULT_REGION,
         )
+    elif provider == EmbeddingsProvider.FAKE:
+        from app.embeddings.fake import FakeEmbeddings
+
+        return FakeEmbeddings()
     else:
         raise ValueError(f"Unsupported embeddings provider: {provider}")
 
 
-EMBEDDINGS_PROVIDER = EmbeddingsProvider(
-    get_env_variable("EMBEDDINGS_PROVIDER", EmbeddingsProvider.OPENAI.value).lower()
+# MT-IT: use fake embeddings when RAG_FAKE_EMBEDDINGS=1 (no OpenAI key required)
+_provider_raw = (
+    "fake"
+    if os.getenv("RAG_FAKE_EMBEDDINGS") == "1"
+    else get_env_variable("EMBEDDINGS_PROVIDER", EmbeddingsProvider.OPENAI.value).lower()
 )
+EMBEDDINGS_PROVIDER = EmbeddingsProvider(_provider_raw)
+
+if os.getenv("RAG_FAKE_EMBEDDINGS") == "1":
+    logger.info("MT-IT FAKE EMBEDDINGS MODE ENABLED (RAG_FAKE_EMBEDDINGS=1)")
+
+    # Guardrail: fake mode must only be used in MT-IT / test contexts.
+    node_env = os.getenv("NODE_ENV", "").lower()
+    mt_it_live = os.getenv("MT_IT_LIVE")
+    if node_env not in {"test", "ci"} and mt_it_live != "1":
+        logger.error(
+            "RAG_FAKE_EMBEDDINGS=1 but NODE_ENV=%r and MT_IT_LIVE=%r; "
+            "fake embeddings are MT-IT/test-only. Refusing to start.",
+            node_env,
+            mt_it_live,
+        )
+        raise SystemExit(
+            "RAG_FAKE_EMBEDDINGS=1 is only allowed in MT-IT / test environments "
+            "(NODE_ENV=test/CI or MT_IT_LIVE=1)."
+        )
 
 if EMBEDDINGS_PROVIDER == EmbeddingsProvider.OPENAI:
     EMBEDDINGS_MODEL = get_env_variable("EMBEDDINGS_MODEL", "text-embedding-3-small")
@@ -331,6 +358,9 @@ elif EMBEDDINGS_PROVIDER == EmbeddingsProvider.BEDROCK:
         "EMBEDDINGS_MODEL", "amazon.titan-embed-text-v1"
     )
     AWS_DEFAULT_REGION = get_env_variable("AWS_DEFAULT_REGION", "us-east-1")
+elif EMBEDDINGS_PROVIDER == EmbeddingsProvider.FAKE:
+    EMBEDDINGS_MODEL = get_env_variable("EMBEDDINGS_MODEL", "fake")
+    EMBEDDINGS_CHUNK_SIZE = int(get_env_variable("EMBEDDINGS_CHUNK_SIZE", "200"))
 else:
     raise ValueError(f"Unsupported embeddings provider: {EMBEDDINGS_PROVIDER}")
 
@@ -345,33 +375,42 @@ else:
     embeddings = init_embeddings(EMBEDDINGS_PROVIDER, EMBEDDINGS_MODEL)
     logger.info(f"Initialized embeddings of type: {type(embeddings)}")
 
-    # Vector store
-    if VECTOR_DB_TYPE == VectorDBType.PGVECTOR:
-        vector_store = get_vector_store(
-            connection_string=CONNECTION_STRING,
-            embeddings=embeddings,
-            collection_name=COLLECTION_NAME,
-            mode="async",
-        )
-    elif VECTOR_DB_TYPE == VectorDBType.ATLAS_MONGO:
-        # Backward compatability check
-        if MONGO_VECTOR_COLLECTION:
-            logger.info(
-                f"DEPRECATED: Please remove env var MONGO_VECTOR_COLLECTION and instead use COLLECTION_NAME and ATLAS_SEARCH_INDEX. You can set both as same, but not neccessary. See README for more information."
-            )
-            ATLAS_SEARCH_INDEX = MONGO_VECTOR_COLLECTION
-            COLLECTION_NAME = MONGO_VECTOR_COLLECTION
-        vector_store = get_vector_store(
-            connection_string=ATLAS_MONGO_DB_URI,
-            embeddings=embeddings,
-            collection_name=COLLECTION_NAME,
-            mode="atlas-mongo",
-            search_index=ATLAS_SEARCH_INDEX,
+    # In MT-IT fake mode, do NOT create a global vector_store against the default DSN.
+    # Tenant-aware vector stores are created per-request via get_tenant_vector_store.
+    if os.getenv("RAG_FAKE_EMBEDDINGS") == "1":
+        vector_store = None
+        retriever = None
+        logger.info(
+            "RAG_FAKE_EMBEDDINGS=1: skipped global vector_store init (no default PG connection)"
         )
     else:
-        raise ValueError(f"Unsupported vector store type: {VECTOR_DB_TYPE}")
+        # Vector store
+        if VECTOR_DB_TYPE == VectorDBType.PGVECTOR:
+            vector_store = get_vector_store(
+                connection_string=CONNECTION_STRING,
+                embeddings=embeddings,
+                collection_name=COLLECTION_NAME,
+                mode="async",
+            )
+        elif VECTOR_DB_TYPE == VectorDBType.ATLAS_MONGO:
+            # Backward compatability check
+            if MONGO_VECTOR_COLLECTION:
+                logger.info(
+                    f"DEPRECATED: Please remove env var MONGO_VECTOR_COLLECTION and instead use COLLECTION_NAME and ATLAS_SEARCH_INDEX. You can set both as same, but not neccessary. See README for more information."
+                )
+                ATLAS_SEARCH_INDEX = MONGO_VECTOR_COLLECTION
+                COLLECTION_NAME = MONGO_VECTOR_COLLECTION
+            vector_store = get_vector_store(
+                connection_string=ATLAS_MONGO_DB_URI,
+                embeddings=embeddings,
+                collection_name=COLLECTION_NAME,
+                mode="atlas-mongo",
+                search_index=ATLAS_SEARCH_INDEX,
+            )
+        else:
+            raise ValueError(f"Unsupported vector store type: {VECTOR_DB_TYPE}")
 
-    retriever = vector_store.as_retriever()
+        retriever = vector_store.as_retriever()
 
 known_source_ext = [
     "go",

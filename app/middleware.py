@@ -12,7 +12,10 @@ async def security_middleware(request: Request, call_next):
     async def next_middleware_call():
         return await call_next(request)
 
+    # Health check, docs, and internal API (uses X-Internal-Auth) don't require JWT or tenant ID
     if request.url.path in {"/docs", "/openapi.json", "/health"}:
+        return await next_middleware_call()
+    if request.url.path.startswith("/internal/"):
         return await next_middleware_call()
 
     jwt_secret = os.getenv("JWT_SECRET")
@@ -45,6 +48,28 @@ async def security_middleware(request: Request, call_next):
             )
 
         request.state.user = payload
+        
+        # Extract X-Tenant-ID header for tenant-specific routing
+        # Required for all RAG operations (embedding, query, delete, etc.)
+        tenant_id = request.headers.get("X-Tenant-ID")
+        if tenant_id:
+            request.state.tenant_id = tenant_id.lower()  # Normalize to lowercase
+            logger.debug(f"{request.url.path} - tenant: {tenant_id}")
+        else:
+            # In multi-tenant mode, tenant ID is required for RAG operations
+            # Fail hard if missing (no fallback to global connection)
+            # Health check endpoint is exempt (handled above)
+            logger.warning(
+                f"Request to {request.url.path} missing X-Tenant-ID header. "
+                "Multi-tenant mode requires tenant ID for RAG operations."
+            )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "X-Tenant-ID header is required for RAG operations in multi-tenant mode"
+                },
+            )
+        
         logger.debug(f"{request.url.path} - {payload}")
     except PyJWTError as e:
         logger.info(

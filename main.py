@@ -22,7 +22,7 @@ from app.config import (
     logger,
 )
 from app.middleware import security_middleware
-from app.routes import document_routes, pgvector_routes
+from app.routes import document_routes, pgvector_routes, internal_routes
 from app.services.database import PSQLDatabase, ensure_vector_indexes
 
 
@@ -41,8 +41,15 @@ async def lifespan(app: FastAPI):
     )
 
     if VECTOR_DB_TYPE == VectorDBType.PGVECTOR:
-        await PSQLDatabase.get_pool()  # Initialize the pool
-        await ensure_vector_indexes()
+        # In MT-IT fake-embeddings mode, per-tenant connections are managed elsewhere.
+        # Avoid creating a default pool against the hard-coded DSN (host "db").
+        if os.getenv("RAG_FAKE_EMBEDDINGS") == "1":
+            logger.info(
+                "RAG_FAKE_EMBEDDINGS=1: skipping default PSQLDatabase pool init and index creation"
+            )
+        else:
+            await PSQLDatabase.get_pool()  # Initialize the pool
+            await ensure_vector_indexes()
 
     yield
 
@@ -73,6 +80,7 @@ app.state.PDF_EXTRACT_IMAGES = PDF_EXTRACT_IMAGES
 
 # Include routers
 app.include_router(document_routes.router)
+app.include_router(internal_routes.router)
 if debug_mode:
     app.include_router(router=pgvector_routes.router)
 

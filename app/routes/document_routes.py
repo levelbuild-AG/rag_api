@@ -36,6 +36,7 @@ from app.config import (
     CHUNK_OVERLAP,
     EMBEDDING_BATCH_SIZE,
     EMBEDDING_MAX_QUEUE_SIZE,
+    EMBEDDINGS_PROVIDER,
 )
 from app.constants import ERROR_MESSAGES
 from app.models import (
@@ -52,6 +53,7 @@ from app.utils.document_loader import (
     cleanup_temp_encoding_file,
 )
 from app.utils.health import is_health_ok
+from app.utils.tenant_store import get_tenant_vector_store
 
 router = APIRouter()
 
@@ -154,10 +156,11 @@ async def cleanup_temp_file_async(file_path: str) -> None:
 @router.get("/ids")
 async def get_all_ids(request: Request):
     try:
-        if isinstance(vector_store, AsyncPgVector):
-            ids = await vector_store.get_all_ids(executor=request.app.state.thread_pool)
+        tenant_store = await get_tenant_vector_store(request)
+        if isinstance(tenant_store, AsyncPgVector):
+            ids = await tenant_store.get_all_ids(executor=request.app.state.thread_pool)
         else:
-            ids = vector_store.get_all_ids()
+            ids = tenant_store.get_all_ids()
 
         return list(set(ids))
     except HTTPException as http_exc:
@@ -178,34 +181,72 @@ async def get_all_ids(request: Request):
 
 @router.get("/health")
 async def health_check():
+    """
+    MT-IT: always return 200 so callers can distinguish 'service up' from 'unreachable'.
+    In fake-embeddings mode, avoid any outbound DB/DNS calls.
+    In normal mode, bound DB checks with a short timeout and report 'DEGRADED' instead of hanging.
+    """
     try:
-        if await is_health_ok():
-            return {"status": "UP"}
-        else:
-            logger.error("Health check failed")
-            return {"status": "DOWN"}, 503
+        # In MT-IT fake mode, don't touch Postgres or Mongo at all.
+        if os.getenv("RAG_FAKE_EMBEDDINGS") == "1":
+            provider = getattr(EMBEDDINGS_PROVIDER, "value", str(EMBEDDINGS_PROVIDER))
+            return {
+                "ok": True,
+                "status": "UP",
+                "provider": provider,
+                "providerReady": True,
+            }
+
+        # Non-fake mode: run DB health with a hard timeout to avoid hangs.
+        try:
+            db_ok = await asyncio.wait_for(is_health_ok(), timeout=3.0)
+        except Exception as inner:
+            logger.error(
+                "Health DB check failed or timed out | Error: %s | Traceback: %s",
+                str(inner),
+                traceback.format_exc(),
+            )
+            db_ok = False
+
+        provider = getattr(EMBEDDINGS_PROVIDER, "value", str(EMBEDDINGS_PROVIDER))
+        body = {
+            "ok": True,
+            "status": "UP" if db_ok else "DEGRADED",
+            "provider": provider,
+            "providerReady": db_ok,
+        }
+        if not db_ok:
+            body["error"] = "Vector DB health check failed or timed out"
+        return body
     except Exception as e:
         logger.error(
             "Error during health check | Error: %s | Traceback: %s",
             str(e),
             traceback.format_exc(),
         )
-        return {"status": "DOWN", "error": str(e)}, 503
+        return {
+            "ok": True,
+            "status": "DEGRADED",
+            "provider": getattr(EMBEDDINGS_PROVIDER, "value", "unknown"),
+            "providerReady": False,
+            "error": str(e),
+        }
 
 
 @router.get("/documents", response_model=list[DocumentResponse])
 async def get_documents_by_ids(request: Request, ids: list[str] = Query(...)):
     try:
-        if isinstance(vector_store, AsyncPgVector):
-            existing_ids = await vector_store.get_filtered_ids(
+        tenant_store = await get_tenant_vector_store(request)
+        if isinstance(tenant_store, AsyncPgVector):
+            existing_ids = await tenant_store.get_filtered_ids(
                 ids, executor=request.app.state.thread_pool
             )
-            documents = await vector_store.get_documents_by_ids(
+            documents = await tenant_store.get_documents_by_ids(
                 ids, executor=request.app.state.thread_pool
             )
         else:
-            existing_ids = vector_store.get_filtered_ids(ids)
-            documents = vector_store.get_documents_by_ids(ids)
+            existing_ids = tenant_store.get_filtered_ids(ids)
+            documents = tenant_store.get_documents_by_ids(ids)
 
         # Ensure all requested ids exist
         if not all(id in existing_ids for id in ids):
@@ -238,16 +279,17 @@ async def get_documents_by_ids(request: Request, ids: list[str] = Query(...)):
 @router.delete("/documents")
 async def delete_documents(request: Request, document_ids: List[str] = Body(...)):
     try:
-        if isinstance(vector_store, AsyncPgVector):
-            existing_ids = await vector_store.get_filtered_ids(
+        tenant_store = await get_tenant_vector_store(request)
+        if isinstance(tenant_store, AsyncPgVector):
+            existing_ids = await tenant_store.get_filtered_ids(
                 document_ids, executor=request.app.state.thread_pool
             )
-            await vector_store.delete(
+            await tenant_store.delete(
                 ids=document_ids, executor=request.app.state.thread_pool
             )
         else:
-            existing_ids = vector_store.get_filtered_ids(document_ids)
-            vector_store.delete(ids=document_ids)
+            existing_ids = tenant_store.get_filtered_ids(document_ids)
+            tenant_store.delete(ids=document_ids)
 
         if not all(id in existing_ids for id in document_ids):
             raise HTTPException(status_code=404, detail="One or more IDs not found")
@@ -274,9 +316,12 @@ async def delete_documents(request: Request, document_ids: List[str] = Body(...)
 
 
 # Cache the embedding function with LRU cache
+# Note: Embeddings are global (not tenant-specific), so this cache is fine
 @lru_cache(maxsize=128)
 def get_cached_query_embedding(query: str):
-    return vector_store.embedding_function.embed_query(query)
+    # Use global embeddings instance (not tenant-specific)
+    from app.config import embeddings
+    return embeddings.embed_query(query)
 
 
 @router.post("/query")
@@ -294,17 +339,18 @@ async def query_embeddings_by_file_id(
     authorized_documents = []
 
     try:
+        tenant_store = await get_tenant_vector_store(request)
         embedding = get_cached_query_embedding(body.query)
 
-        if isinstance(vector_store, AsyncPgVector):
-            documents = await vector_store.asimilarity_search_with_score_by_vector(
+        if isinstance(tenant_store, AsyncPgVector):
+            documents = await tenant_store.asimilarity_search_with_score_by_vector(
                 embedding,
                 k=body.k,
                 filter={"file_id": body.file_id},
                 executor=request.app.state.thread_pool,
             )
         else:
-            documents = vector_store.similarity_search_with_score_by_vector(
+            documents = tenant_store.similarity_search_with_score_by_vector(
                 embedding, k=body.k, filter={"file_id": body.file_id}
             )
 
@@ -646,6 +692,7 @@ def _prepare_documents_sync(
 async def store_data_in_vector_db(
     data: Iterable[Document],
     file_id: str,
+    vector_store,  # Tenant-specific vector store (required)
     user_id: str = "",
     clean_content: bool = False,
     executor=None,
@@ -723,10 +770,12 @@ async def embed_local_file(
         # Clean up temporary UTF-8 file if it was created for encoding conversion
         cleanup_temp_encoding_file(loader)
 
+        tenant_store = await get_tenant_vector_store(request)
         result = await store_data_in_vector_db(
             data,
             document.file_id,
-            user_id,
+            tenant_store,
+            user_id=user_id,
             clean_content=file_ext == "pdf",
             executor=request.app.state.thread_pool,
         )
@@ -790,9 +839,11 @@ async def embed_file(
             request.app.state.thread_pool,
         )
 
+        tenant_store = await get_tenant_vector_store(request)
         result = await store_data_in_vector_db(
             data=data,
             file_id=file_id,
+            vector_store=tenant_store,
             user_id=user_id,
             clean_content=file_ext == "pdf",
             executor=request.app.state.thread_pool,
@@ -852,16 +903,17 @@ async def embed_file(
 async def load_document_context(request: Request, id: str):
     ids = [id]
     try:
-        if isinstance(vector_store, AsyncPgVector):
-            existing_ids = await vector_store.get_filtered_ids(
+        tenant_store = await get_tenant_vector_store(request)
+        if isinstance(tenant_store, AsyncPgVector):
+            existing_ids = await tenant_store.get_filtered_ids(
                 ids, executor=request.app.state.thread_pool
             )
-            documents = await vector_store.get_documents_by_ids(
+            documents = await tenant_store.get_documents_by_ids(
                 ids, executor=request.app.state.thread_pool
             )
         else:
-            existing_ids = vector_store.get_filtered_ids(ids)
-            documents = vector_store.get_documents_by_ids(ids)
+            existing_ids = tenant_store.get_filtered_ids(ids)
+            documents = tenant_store.get_documents_by_ids(ids)
 
         # Ensure the requested id exists
         if not all(id in existing_ids for id in ids):
@@ -916,10 +968,12 @@ async def embed_file_upload(
             request.app.state.thread_pool,
         )
 
+        tenant_store = await get_tenant_vector_store(request)
         result = await store_data_in_vector_db(
             data,
             file_id,
-            user_id,
+            tenant_store,
+            user_id=user_id,
             clean_content=file_ext == "pdf",
             executor=request.app.state.thread_pool,
         )
@@ -962,19 +1016,20 @@ async def embed_file_upload(
 @router.post("/query_multiple")
 async def query_embeddings_by_file_ids(request: Request, body: QueryMultipleBody):
     try:
+        tenant_store = await get_tenant_vector_store(request)
         # Get the embedding of the query text
         embedding = get_cached_query_embedding(body.query)
 
         # Perform similarity search with the query embedding and filter by the file_ids in metadata
-        if isinstance(vector_store, AsyncPgVector):
-            documents = await vector_store.asimilarity_search_with_score_by_vector(
+        if isinstance(tenant_store, AsyncPgVector):
+            documents = await tenant_store.asimilarity_search_with_score_by_vector(
                 embedding,
                 k=body.k,
                 filter={"file_id": {"$in": body.file_ids}},
                 executor=request.app.state.thread_pool,
             )
         else:
-            documents = vector_store.similarity_search_with_score_by_vector(
+            documents = tenant_store.similarity_search_with_score_by_vector(
                 embedding, k=body.k, filter={"file_id": {"$in": body.file_ids}}
             )
 
