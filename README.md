@@ -1,93 +1,376 @@
-# Rag Api
+# ID-based RAG FastAPI
 
+## Overview
+This project integrates Langchain with FastAPI in an Asynchronous, Scalable manner, providing a framework for document indexing and retrieval, using PostgreSQL/pgvector.
 
+Files are organized into embeddings by `file_id`. The primary use case is for integration with [LibreChat](https://librechat.ai), but this simple API can be used for any ID-based use case.
 
-## Getting started
+The main reason to use the ID approach is to work with embeddings on a file-level. This makes for targeted queries when combined with file metadata stored in a database, such as is done by LibreChat.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+The API will evolve over time to employ different querying/re-ranking methods, embedding models, and vector stores.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Features
+- **Document Management**: Methods for adding, retrieving, and deleting documents.
+- **Vector Store**: Utilizes Langchain's vector store for efficient document retrieval.
+- **Asynchronous Support**: Offers async operations for enhanced performance.
 
-## Add your files
+## Setup
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+### Getting Started
 
+- **Configure `.env` file based on [section below](#environment-variables)**
+- **Setup pgvector database:**
+  - Run an existing PSQL/PGVector setup, or,
+  - Docker: `docker compose up` (also starts RAG API)
+    - or, use docker just for DB: `docker compose -f ./db-compose.yaml up`
+- **Run API**:
+  - Docker: `docker compose up` (also starts PSQL/pgvector)
+    - or, use docker just for RAG API: `docker compose -f ./api-compose.yaml up`
+  - Local:
+    - Make sure to setup `DB_HOST` to the correct database hostname
+    - Run the following commands (preferably in a [virtual environment](https://realpython.com/python-virtual-environments-a-primer/))
+```bash
+pip install -r requirements.txt
+uvicorn main:app
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/dev6283740/levelbuild/levelai/rag-api.git
-git branch -M main
-git push -uf origin main
+
+### Clean Install (Local Development)
+
+To do a clean reinstall of all dependencies (e.g., after updating `requirements.txt`):
+
+**Linux/macOS:**
+```bash
+# Remove existing virtual environment and recreate it
+rm -rf venv
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-## Integrate with your tools
+**Windows PowerShell:**
+```powershell
+# Remove existing virtual environment and recreate it
+Remove-Item -Recurse -Force .venv -ErrorAction SilentlyContinue
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
 
-* [Set up project integrations](https://gitlab.com/dev6283740/levelbuild/levelai/rag-api/-/settings/integrations)
+### Run tests locally
 
-## Collaborate with your team
+**Prerequisites:** Create a dedicated venv for rag_api tests.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+**Linux/macOS:**
+```bash
+cd infra/rag_api
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -r test_requirements.txt  # Install pytest, pytest-mock, etc.
+pytest -q  # Quick test run
+pytest tests/utils/test_document_loader.py -v  # Document loader tests
+pytest tests/utils/test_ocr_pdf_service.py -v  # OCR client tests
+```
 
-## Test and Deploy
+**Windows PowerShell:**
+```powershell
+cd infra/rag_api
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -r test_requirements.txt  # Install pytest, pytest-mock, etc.
+pytest -q  # Quick test run
+pytest tests/utils/test_document_loader.py -v  # Document loader tests
+pytest tests/utils/test_ocr_pdf_service.py -v  # OCR client tests
+```
 
-Use the built-in continuous integration in GitLab.
+**Note:** Some tests may require external services (e.g., database, OCR service). These are mocked in unit tests. Integration tests that require real services are marked and can be skipped with `pytest -m "not integration"`.
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+For the lite version (without sentence_transformers/huggingface):
 
-***
+```bash
+rm -rf venv
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.lite.txt
+```
 
-# Editing this README
+For Docker, rebuild without cache:
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+```bash
+docker compose build --no-cache
+```
 
-## Suggestions for a good README
+### Environment Variables
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+The following environment variables are required to run the application:
 
-## Name
-Choose a self-explaining name for your project.
+- `RAG_OPENAI_API_KEY`: The API key for OpenAI API Embeddings (if using default settings).
+    - Note: `OPENAI_API_KEY` will work but `RAG_OPENAI_API_KEY` will override it in order to not conflict with LibreChat setting.
+- `RAG_OPENAI_BASEURL`: (Optional) The base URL for your OpenAI API Embeddings
+- `RAG_OPENAI_PROXY`: (Optional) Proxy for OpenAI API Embeddings
+    - Note: When using with LibreChat, you can also set `HTTP_PROXY` and `HTTPS_PROXY` environment variables in the `docker-compose.override.yml` file (see [Proxy Configuration](#proxy-configuration) section below)
+- `VECTOR_DB_TYPE`: (Optional) select vector database type, default to `pgvector`.
+- `POSTGRES_USE_UNIX_SOCKET`: (Optional) Set to "True" when connecting to the PostgreSQL database server with Unix Socket.
+- `POSTGRES_DB`: (Optional) The name of the PostgreSQL database, used when `VECTOR_DB_TYPE=pgvector`.
+- `POSTGRES_USER`: (Optional) The username for connecting to the PostgreSQL database.
+- `POSTGRES_PASSWORD`: (Optional) The password for connecting to the PostgreSQL database.
+- `DB_HOST`: (Optional) The hostname or IP address of the PostgreSQL database server.
+- `DB_PORT`: (Optional) The port number of the PostgreSQL database server.
+- `RAG_HOST`: (Optional) The hostname or IP address where the API server will run. Defaults to "0.0.0.0"
+- `RAG_PORT`: (Optional) The port number where the API server will run. Defaults to port 8000.
+- `JWT_SECRET`: (Optional) The secret key used for verifying JWT tokens for requests.
+  - The secret is only used for verification. This basic approach assumes a signed JWT from elsewhere.
+  - Omit to run API without requiring authentication
+- `SYSTEM_MONGO_URI`: (Required for multi-tenant) System MongoDB URI where the LibreChat `tenants` collection lives. Used to resolve tenant RAG config (postgresUri, vectorDbType) per request.
+- `RAG_INTERNAL_AUTH_SECRET`: (Optional, min 16 chars) Shared secret for internal cache invalidation. When set, LibreChat API can call `POST /internal/cache/invalidate` with header `X-Internal-Auth` to invalidate tenant RAG cache after config updates. Must match `RAG_INTERNAL_AUTH_SECRET` (or `INTERNAL_AUTH_SECRET`) on the LibreChat API side.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+- `COLLECTION_NAME`: (Optional) The name of the collection in the vector store. Default value is "testcollection".
+- `CHUNK_SIZE`: (Optional) The size of the chunks for text processing. Default value is "1500".
+- `CHUNK_OVERLAP`: (Optional) The overlap between chunks during text processing. Default value is "100".
+- `EMBEDDING_BATCH_SIZE`: (Optional) Number of document chunks to process per batch. Set to `0` (default) to disable batching. Recommended value is `750` for `text-embedding-3-small`.
+- `EMBEDDING_MAX_QUEUE_SIZE`: (Optional) Maximum number of batches to buffer in memory during async processing. Default value is "3".
+- `RAG_UPLOAD_DIR`: (Optional) The directory where uploaded files are stored. Default value is "./uploads/".
+- `PDF_EXTRACT_IMAGES`: (Optional) A boolean value indicating whether to extract images from PDF files. Default value is "False".
+- `OCR_PDF_SERVICE_URL`: (Required for scanned PDFs) URL of Cloud Run OCR service. If a PDF is detected as scanned (< 25 chars extracted), OCR is mandatory and ingestion fails if this is not set. Example: `https://ocr-service-xxx.run.app`
+- `OCR_PDF_TIMEOUT_SECONDS`: (Optional) Timeout in seconds for OCR service calls. Default value is "60".
+- `OCR_MAX_PDF_BYTES`: (Optional) When OCR is required, PDFs larger than this (bytes) cause ingestion to fail. Default 25 MB (26214400).
+- `SCANNED_PDF_OCR_REQUIRED_CHARS`: (Optional) If extracted PDF text has fewer than this many characters, the PDF is treated as scanned and OCR is mandatory. Default value is "25".
+- `SCANNED_PDF_CHAR_THRESHOLD`: (Optional, legacy) Character count threshold. Prefer `SCANNED_PDF_OCR_REQUIRED_CHARS` for the OCR-required rule. Default value is "300".
+- `DEBUG_RAG_API`: (Optional) Set to "True" to show more verbose logging output in the server console, and to enable postgresql database routes
+- `DEBUG_PGVECTOR_QUERIES`: (Optional) Set to "True" to enable detailed PostgreSQL query logging for pgvector operations. Useful for debugging performance issues with vector database queries.
+- `CONSOLE_JSON`: (Optional) Set to "True" to log as json for Cloud Logging aggregations
+- `EMBEDDINGS_PROVIDER`: (Optional) either "openai", "bedrock", "azure", "huggingface", "huggingfacetei", "google_genai", "vertexai", or "ollama", where "huggingface" uses sentence_transformers; defaults to "openai"
+- `EMBEDDINGS_MODEL`: (Optional) Set a valid embeddings model to use from the configured provider.
+    - **Defaults**
+    - openai: "text-embedding-3-small"
+    - azure: "text-embedding-3-small" (will be used as your Azure Deployment)
+    - huggingface: "sentence-transformers/all-MiniLM-L6-v2"
+    - huggingfacetei: "http://huggingfacetei:3000". Hugging Face TEI uses model defined on TEI service launch.
+    - vertexai: "text-embedding-004"
+    - ollama: "nomic-embed-text"
+    - bedrock: "amazon.titan-embed-text-v1"
+    - google_genai: "gemini-embedding-001"
+- `RAG_AZURE_OPENAI_API_VERSION`: (Optional) Default is `2023-05-15`. The version of the Azure OpenAI API.
+- `RAG_AZURE_OPENAI_API_KEY`: (Optional) The API key for Azure OpenAI service.
+    - Note: `AZURE_OPENAI_API_KEY` will work but `RAG_AZURE_OPENAI_API_KEY` will override it in order to not conflict with LibreChat setting.
+- `RAG_AZURE_OPENAI_ENDPOINT`: (Optional) The endpoint URL for Azure OpenAI service, including the resource.
+    - Example: `https://YOUR_RESOURCE_NAME.openai.azure.com`.
+    - Note: `AZURE_OPENAI_ENDPOINT` will work but `RAG_AZURE_OPENAI_ENDPOINT` will override it in order to not conflict with LibreChat setting.
+- `HF_TOKEN`: (Optional) if needed for `huggingface` option.
+- `OLLAMA_BASE_URL`: (Optional) defaults to `http://ollama:11434`.
+- `ATLAS_SEARCH_INDEX`: (Optional) the name of the vector search index if using Atlas MongoDB, defaults to `vector_index`
+- `MONGO_VECTOR_COLLECTION`: Deprecated for MongoDB, please use `ATLAS_SEARCH_INDEX` and `COLLECTION_NAME`
+- `AWS_DEFAULT_REGION`: (Optional) defaults to `us-east-1`
+- `AWS_ACCESS_KEY_ID`: (Optional) needed for bedrock embeddings
+- `AWS_SECRET_ACCESS_KEY`: (Optional) needed for bedrock embeddings
+- `GOOGLE_API_KEY`, `GOOGLE_KEY`, `RAG_GOOGLE_API_KEY`: (Optional) Google API key for Google GenAI embeddings. Priority order: RAG_GOOGLE_API_KEY > GOOGLE_KEY > GOOGLE_API_KEY
+- `AWS_SESSION_TOKEN`: (Optional) may be needed for bedrock embeddings
+- `GOOGLE_APPLICATION_CREDENTIALS`: (Optional) needed for Google VertexAI embeddings. This should be a path to a service account credential file in JSON format, as accepted by [langchain](https://python.langchain.com/api_reference/google_vertexai/index.html)
+- `RAG_CHECK_EMBEDDING_CTX_LENGTH` (Optional) Default is true, disabling this will send raw input to the embedder, use this for custom embedding models.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+Make sure to set these environment variables before running the application. You can set them in a `.env` file or as system environment variables.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+### Embedding Batch Processing
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+For large files, you can enable batched embedding processing to reduce memory consumption. This is particularly useful in memory-constrained environments like Kubernetes pods with memory limits.
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+#### Configuration
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EMBEDDING_BATCH_SIZE` | `0` | Number of document chunks to process per batch. `0` disables batching (original behavior). |
+| `EMBEDDING_MAX_QUEUE_SIZE` | `3` | Maximum number of batches to buffer in memory during async processing. |
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+#### Recommended Settings
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+For `text-embedding-3-small` model:
+- `EMBEDDING_BATCH_SIZE=750` - Good balance of throughput and memory
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+For memory-constrained environments (< 2GB RAM):
+- `EMBEDDING_BATCH_SIZE=100-250`
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+For high-throughput environments:
+- `EMBEDDING_BATCH_SIZE=1000-2000`
+- `EMBEDDING_MAX_QUEUE_SIZE=5`
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+#### Behavior
 
-## License
-For open source projects, say how it is licensed.
+When `EMBEDDING_BATCH_SIZE > 0`:
+- Documents are processed in batches of the specified size
+- Each batch is embedded and inserted before the next batch starts
+- On failure, successfully inserted documents are rolled back
+- Memory usage is bounded by `EMBEDDING_BATCH_SIZE * EMBEDDING_MAX_QUEUE_SIZE`
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+When `EMBEDDING_BATCH_SIZE = 0` (default):
+- All documents are processed at once (original behavior)
+- Better for small files or memory-rich environments
+
+### Use Atlas MongoDB as Vector Database
+
+Instead of using the default pgvector, we could use [Atlas MongoDB](https://www.mongodb.com/products/platform/atlas-vector-search) as the vector database. To do so, set the following environment variables
+
+```env
+VECTOR_DB_TYPE=atlas-mongo
+ATLAS_MONGO_DB_URI=<mongodb+srv://...>
+COLLECTION_NAME=<vector collection>
+ATLAS_SEARCH_INDEX=<vector search index>
+```
+
+The `ATLAS_MONGO_DB_URI` could be the same or different from what is used by LibreChat. Even if it is the same, the `$COLLECTION_NAME` collection needs to be a completely new one, separate from all collections used by LibreChat. In addition,  create a vector search index for collection above (remember to assign `$ATLAS_SEARCH_INDEX`) with the following json:
+
+```json
+{
+  "fields": [
+    {
+      "numDimensions": 1536,
+      "path": "embedding",
+      "similarity": "cosine",
+      "type": "vector"
+    },
+    {
+      "path": "file_id",
+      "type": "filter"
+    }
+  ]
+}
+```
+
+Follow one of the [four documented methods](https://www.mongodb.com/docs/atlas/atlas-vector-search/create-index/#procedure) to create the vector index.
+
+#### Create a `file_id` Index (recommended)
+
+We recommend creating a standard MongoDB index on `file_id` to keep lookups fast. After creating the collection, run the following once (via Atlas UI, Compass, or `mongosh`):
+
+```javascript
+db.getCollection("<COLLECTION_NAME>").createIndex({ file_id: 1 })
+```
+
+Replace `<COLLECTION_NAME>` with the same collection used by the RAG API. This ensures lookups remain fast even as the number of embedded documents grows.
+
+
+### Proxy Configuration
+
+When using the RAG API with LibreChat and you need to configure proxy settings, you can set the `HTTP_PROXY` and `HTTPS_PROXY` environment variables in the [`docker-compose.override.yml`](https://www.librechat.ai/docs/configuration/docker_override) file (from the LibreChat repository):
+
+```yaml
+rag_api:
+    environment:
+        - HTTP_PROXY=<your-proxy>
+        - HTTPS_PROXY=<your-proxy>
+```
+
+This configuration will ensure that all HTTP/HTTPS requests from the RAG API container are routed through your specified proxy server.
+
+
+### Cloud Installation Settings:
+
+#### AWS:
+Make sure your RDS Postgres instance adheres to this requirement:
+
+`The pgvector extension version 0.5.0 is available on database instances in Amazon RDS running PostgreSQL 15.4-R2 and higher, 14.9-R2 and higher, 13.12-R2 and higher, and 12.16-R2 and higher in all applicable AWS Regions, including the AWS GovCloud (US) Regions.`
+
+In order to setup RDS Postgres with RAG API, you can follow these steps:
+
+* Create a RDS Instance/Cluster using the provided [AWS Documentation](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_CreateDBInstance.html).
+* Login to the RDS Cluster using the Endpoint connection string from the RDS Console or from your IaC Solution output.
+* The login is via the *Master User*.
+* Create a dedicated database for rag_api:
+``` create database rag_api;```.
+* Create a dedicated user\role for that database:
+``` create role rag;```
+
+* Switch to the database you just created: ```\c rag_api```
+* Enable the Vector extension: ```create extension vector;```
+* Use the documentation provided above to set up the connection string to the RDS Postgres Instance\Cluster.
+
+Notes:
+  * Even though you're logging with a Master user, it doesn't have all the super user privileges, that's why we cannot use the command: ```create role x with superuser;```
+  * If you do not enable the extension, rag_api service will throw an error that it cannot create the extension due to the note above.
+
+### Dev notes:
+
+#### Running Tests
+
+##### Prerequisites
+
+Install test dependencies:
+
+```bash
+pip install -r test_requirements.txt
+```
+
+##### Running All Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run with verbose output
+pytest -v
+
+# Run with coverage (if pytest-cov is installed)
+pytest --cov=app
+```
+
+##### Running Specific Test Files
+
+```bash
+# Run batch processing unit tests
+pytest tests/test_batch_processing.py -v
+
+# Run batch processing integration tests (memory optimization tests)
+pytest tests/test_batch_processing_integration.py -v
+
+# Run main API tests
+pytest tests/test_main.py -v
+```
+
+##### Running Tests by Category
+
+```bash
+# Run only integration tests (marked with @pytest.mark.integration)
+pytest -m integration -v
+
+# Skip integration tests
+pytest -m "not integration" -v
+
+# Run only async tests
+pytest -k "async" -v
+```
+
+##### Test Categories
+
+| Test File | Description |
+|-----------|-------------|
+| `test_batch_processing.py` | Unit tests for batch processing functions |
+| `test_batch_processing_integration.py` | Memory optimization and integration tests |
+| `test_main.py` | API endpoint tests |
+| `test_config.py` | Configuration tests |
+| `test_middleware.py` | Middleware tests |
+| `test_models.py` | Model tests |
+
+##### Memory Optimization Tests
+
+The `test_batch_processing_integration.py` file includes tests that verify the memory optimization behavior:
+
+- **`test_memory_bounded_by_batch_size`**: Verifies that the number of documents in memory at any time is bounded by `EMBEDDING_BATCH_SIZE`
+- **`test_memory_tracking_with_tracemalloc`**: Uses Python's `tracemalloc` to monitor memory usage during batch processing
+- **`test_sync_memory_bounded_by_batch_size`**: Same verification for the synchronous code path
+
+Run memory tests specifically:
+
+```bash
+pytest tests/test_batch_processing_integration.py::TestMemoryOptimization -v
+pytest tests/test_batch_processing_integration.py::TestSyncBatchedMemory -v
+```
+
+#### Installing pre-commit formatter
+
+Run the following commands to install pre-commit formatter, which uses [black](https://github.com/psf/black) code formatter:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
