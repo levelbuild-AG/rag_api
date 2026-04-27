@@ -28,6 +28,28 @@ def test_get_loader_text(tmp_path):
     # Check that data is loaded.
     assert data is not None
 
+
+def test_get_loader_sql_known_type_with_generic_mime(tmp_path):
+    file_path = tmp_path / "schema.sql"
+    file_path.write_text("SELECT 1;")
+    loader, known_type, file_ext = get_loader(
+        "schema.sql", "application/octet-stream", str(file_path)
+    )
+    assert known_type is True
+    assert file_ext == "sql"
+    assert loader.load() is not None
+
+
+def test_get_loader_gitignore_known_type_with_generic_mime(tmp_path):
+    file_path = tmp_path / ".gitignore"
+    file_path.write_text("node_modules/\n")
+    loader, known_type, file_ext = get_loader(
+        ".gitignore", "application/octet-stream", str(file_path)
+    )
+    assert known_type is True
+    assert file_ext == "gitignore"
+    assert loader.load() is not None
+
 def test_process_documents():
     docs = [
         Document(page_content="Page 1 content", metadata={"source": "dummy.txt", "page": 1}),
