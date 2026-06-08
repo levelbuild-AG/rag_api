@@ -4,6 +4,8 @@ import hashlib
 import traceback
 import aiofiles
 import aiofiles.os
+import uuid
+import shutil
 from shutil import copyfileobj
 from typing import List, Iterable, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor
@@ -825,9 +827,13 @@ async def embed_file(
     known_type = None
 
     user_id = get_user_id(request, entity_id)
-    temp_base_path = os.path.join(RAG_UPLOAD_DIR, user_id)
+    # Generate unique request ID for isolation
+    request_id = str(uuid.uuid4())
+    temp_base_path = os.path.join(RAG_UPLOAD_DIR, user_id, request_id)
     os.makedirs(temp_base_path, exist_ok=True)
-    temp_file_path = os.path.join(RAG_UPLOAD_DIR, user_id, file.filename)
+    # Sanitize filename to prevent path traversal
+    safe_filename = os.path.basename(file.filename)
+    temp_file_path = os.path.join(temp_base_path, safe_filename)
 
     await save_upload_file_async(file, temp_file_path)
 
@@ -879,7 +885,7 @@ async def embed_file(
         response_status = False
         response_message = f"Error during file processing: {str(e)}"
         logger.error(
-            "Error during file processing: %s\nTraceback: %s",
+            "Error during file processing | Error: %s\nTraceback: %s",
             str(e),
             traceback.format_exc(),
         )
@@ -888,7 +894,24 @@ async def embed_file(
             detail=f"Error during file processing: {str(e)}",
         )
     finally:
-        await cleanup_temp_file_async(temp_file_path)
+        # Clean up the entire request-scoped temporary directory with safety guard
+        try:
+            # Verify cleanup scope to prevent accidental deletion of parent directories
+            real_base = os.path.realpath(RAG_UPLOAD_DIR)
+            real_temp = os.path.realpath(temp_base_path)
+
+            if real_temp.startswith(real_base + os.sep) and request_id in real_temp:
+                shutil.rmtree(real_temp)
+                logger.debug("Successfully removed temporary directory: %s", real_temp)
+            else:
+                logger.error("Refusing unsafe temp cleanup path: %s", real_temp)
+        except Exception as e:
+            logger.error(
+                "Failed to remove temporary directory | Path: %s | Error: %s | Traceback: %s",
+                temp_base_path,
+                str(e),
+                traceback.format_exc(),
+            )
 
     return {
         "status": response_status,
@@ -956,7 +979,13 @@ async def embed_file_upload(
     entity_id: str = Form(None),
 ):
     user_id = get_user_id(request, entity_id)
-    temp_file_path = os.path.join(RAG_UPLOAD_DIR, uploaded_file.filename)
+    # Generate unique request ID for isolation
+    request_id = str(uuid.uuid4())
+    temp_base_path = os.path.join(RAG_UPLOAD_DIR, user_id, request_id)
+    os.makedirs(temp_base_path, exist_ok=True)
+    # Sanitize filename to prevent path traversal
+    safe_filename = os.path.basename(uploaded_file.filename)
+    temp_file_path = os.path.join(temp_base_path, safe_filename)
 
     await save_upload_file_async(uploaded_file, temp_file_path)
 
@@ -1002,7 +1031,24 @@ async def embed_file_upload(
             detail=f"Error during file processing: {str(e)}",
         )
     finally:
-        await cleanup_temp_file_async(temp_file_path)
+        # Clean up the entire request-scoped temporary directory with safety guard
+        try:
+            # Verify cleanup scope to prevent accidental deletion of parent directories
+            real_base = os.path.realpath(RAG_UPLOAD_DIR)
+            real_temp = os.path.realpath(temp_base_path)
+
+            if real_temp.startswith(real_base + os.sep) and request_id in real_temp:
+                shutil.rmtree(real_temp)
+                logger.debug("Successfully removed temporary directory: %s", real_temp)
+            else:
+                logger.error("Refusing unsafe temp cleanup path: %s", real_temp)
+        except Exception as e:
+            logger.error(
+                "Failed to remove temporary directory | Path: %s | Error: %s | Traceback: %s",
+                temp_base_path,
+                str(e),
+                traceback.format_exc(),
+            )
 
     return {
         "status": True,
@@ -1070,9 +1116,13 @@ async def extract_text_from_file(
     Returns the raw text content for text parsing purposes.
     """
     user_id = get_user_id(request, entity_id)
-    temp_base_path = os.path.join(RAG_UPLOAD_DIR, user_id)
+    # Generate unique request ID for isolation
+    request_id = str(uuid.uuid4())
+    temp_base_path = os.path.join(RAG_UPLOAD_DIR, user_id, request_id)
     os.makedirs(temp_base_path, exist_ok=True)
-    temp_file_path = os.path.join(RAG_UPLOAD_DIR, user_id, file.filename)
+    # Sanitize filename to prevent path traversal
+    safe_filename = os.path.basename(file.filename)
+    temp_file_path = os.path.join(temp_base_path, safe_filename)
 
     await save_upload_file_async(file, temp_file_path)
 
@@ -1119,4 +1169,28 @@ async def extract_text_from_file(
                 detail=f"Error during text extraction: {str(e)}",
             )
     finally:
-        await cleanup_temp_file_async(temp_file_path)
+        # Clean up the entire request-scoped temporary directory with safety guard
+        try:
+            # Verify cleanup scope to prevent accidental deletion of parent directories
+            real_base = os.path.realpath(RAG_UPLOAD_DIR)
+            real_temp = os.path.realpath(temp_base_path)
+
+            if real_temp.startswith(real_base + os.sep) and request_id in real_temp:
+                shutil.rmtree(real_temp)
+                logger.debug("Successfully removed temporary directory: %s", real_temp)
+            else:
+                logger.error("Refusing unsafe temp cleanup path: %s", real_temp)
+        except Exception as e:
+            logger.error(
+                "Failed to remove temporary directory | Path: %s | Error: %s | Traceback: %s",
+                temp_base_path,
+                str(e),
+                traceback.format_exc(),
+            )
+
+    return {
+        "text": text_content,
+        "file_id": file_id,
+        "filename": file.filename,
+        "known_type": known_type,
+    }
