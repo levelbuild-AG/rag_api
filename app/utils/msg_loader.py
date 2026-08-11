@@ -1,6 +1,7 @@
 # app/utils/msg_loader.py
 
 import os
+from html.parser import HTMLParser
 from typing import List
 from datetime import datetime
 
@@ -13,6 +14,81 @@ try:
 except ImportError:
     extract_msg = None
     logger.warning("extract-msg library not installed. .msg file support will not work.")
+
+
+def _strip_nul(value) -> str:
+    """
+    Remove NUL (0x00) from extracted text.
+
+    Postgres text columns cannot store NUL. One anywhere in page_content or metadata aborts
+    the whole pgvector insert with:
+        ValueError: A string literal cannot contain NUL (0x00) characters.
+    and the upload surfaces to the user as a generic "File embedding failed".
+
+    .msg is a CFB container holding strings as UTF-16, and extract_msg hands back the string
+    terminator on some fields — an Outlook subject routinely ends with one. Applied to every
+    extracted field rather than only the subject, because the terminator is a property of the
+    format, not of that one field.
+
+    Only NUL is stripped: every other control character is valid in a Postgres text column,
+    and dropping them would silently mangle legitimate content.
+    """
+    if not value:
+        return ""
+    return str(value).replace("\x00", "")
+
+
+class _HtmlTextExtractor(HTMLParser):
+    """
+    Minimal HTML -> plain text.
+
+    Deliberately the stdlib parser: bs4 and lxml are present in the image only as transitive
+    dependencies and are absent from requirements.txt, so importing them here would work today
+    and break on a rebuild that resolves differently.
+    """
+
+    _SKIP_TAGS = ("script", "style", "head")
+    _BREAK_TAGS = ("p", "div", "br", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6", "table")
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._parts: List[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+        elif tag in self._BREAK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP_TAGS and self._skip_depth:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        lines = "".join(self._parts).splitlines()
+        return "\n".join(line.strip() for line in lines if line.strip())
+
+
+def _html_to_text(html) -> str:
+    """Best-effort HTML -> text; returns '' rather than raising, so a malformed body never
+    fails the whole upload."""
+    if not html:
+        return ""
+    if isinstance(html, bytes):
+        html = html.decode("utf-8", errors="replace")
+    try:
+        parser = _HtmlTextExtractor()
+        parser.feed(html)
+        parser.close()
+        return parser.get_text()
+    except Exception as exc:  # noqa: BLE001 - malformed HTML must not abort ingestion
+        logger.warning(f"MsgLoader: failed to extract text from HTML body: {exc}")
+        return ""
 
 
 class MsgLoader:
@@ -33,11 +109,12 @@ class MsgLoader:
         try:
             msg = extract_msg.Message(self.filepath)
 
-            # Extract headers
-            subject = msg.subject or ""
-            sender = msg.sender or ""
-            to_recipients = msg.to or ""
-            cc_recipients = msg.cc or ""
+            # Extract headers. _strip_nul on every field: the UTF-16 string terminator can
+            # ride along on any of them, and a single NUL aborts the pgvector insert.
+            subject = _strip_nul(msg.subject)
+            sender = _strip_nul(msg.sender)
+            to_recipients = _strip_nul(msg.to)
+            cc_recipients = _strip_nul(msg.cc)
             date = msg.date
 
             # Format date
@@ -51,8 +128,20 @@ class MsgLoader:
                 except Exception:
                     email_date = str(date) if date else ""
 
-            # Extract body (plain text)
-            body = msg.body or ""
+            # Extract body. Prefer the plain-text part, but fall back to the HTML one when it
+            # is absent: mail composed in the new Outlook (and most modern clients) is often
+            # HTML-only, so msg.body is empty and the document would otherwise be indexed with
+            # nothing but headers — technically a successful upload that finds nothing on
+            # search. This is the likelier explanation for "old Outlook works, new does not"
+            # than any MIME difference.
+            body = _strip_nul(msg.body)
+            if not body.strip():
+                body = _strip_nul(_html_to_text(getattr(msg, "htmlBody", None)))
+                if body:
+                    logger.info(
+                        f"MsgLoader: no plain-text body in {os.path.basename(self.filepath)}; "
+                        "extracted text from the HTML body instead"
+                    )
 
             # Build page_content
             page_content_parts = []
@@ -88,10 +177,12 @@ class MsgLoader:
             attachments = []
             if hasattr(msg, "attachments") and msg.attachments:
                 for att in msg.attachments:
+                    # Filenames land in metadata and are stored in Postgres too, so they need
+                    # the same NUL treatment as the header fields.
                     if hasattr(att, "longFilename") and att.longFilename:
-                        attachments.append(att.longFilename)
+                        attachments.append(_strip_nul(att.longFilename))
                     elif hasattr(att, "shortFilename") and att.shortFilename:
-                        attachments.append(att.shortFilename)
+                        attachments.append(_strip_nul(att.shortFilename))
 
             if attachments:
                 metadata["attachments"] = attachments
