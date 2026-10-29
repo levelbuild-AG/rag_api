@@ -101,6 +101,14 @@ OCR_MAX_PDF_BYTES = int(
 SCANNED_PDF_OCR_REQUIRED_CHARS = int(
     get_env_variable("SCANNED_PDF_OCR_REQUIRED_CHARS", "25")
 )
+# A PDF whose every page is one full-page image is a scan and is OCR'd even if it already has a
+# text layer (typically poor output from an earlier OCR pass). Set to "false" to disable.
+SCANNED_PDF_IMAGE_PAGES_OCR = (
+    get_env_variable("SCANNED_PDF_IMAGE_PAGES_OCR", "true").lower() == "true"
+)
+# A fillable PDF form with values filled in is OCR'd so the text reads as the completed form
+# (otherwise the values are appended after the page text). Set to "false" to disable.
+FILLED_FORM_PDFS_OCR = get_env_variable("FILLED_FORM_PDFS_OCR", "true").lower() == "true"
 # Legacy; prefer SCANNED_PDF_OCR_REQUIRED_CHARS for OCR-required rule
 SCANNED_PDF_CHAR_THRESHOLD = int(
     get_env_variable("SCANNED_PDF_CHAR_THRESHOLD", "300")
