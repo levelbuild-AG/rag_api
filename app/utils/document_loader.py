@@ -17,7 +17,10 @@ from app.config import (
     OCR_PDF_SERVICE_URL,
     OCR_MAX_PDF_BYTES,
     SCANNED_PDF_OCR_REQUIRED_CHARS,
+    SCANNED_PDF_IMAGE_PAGES_OCR,
+    FILLED_FORM_PDFS_OCR,
 )
+from pypdf import PdfReader
 from langchain_community.document_loaders import (
     TextLoader,
     PyPDFLoader,
@@ -232,6 +235,111 @@ def process_documents(documents: List[Document]) -> str:
     return processed_text.strip()
 
 
+def _page_is_full_image(page) -> bool:
+    """True if the page holds an image sized like the page itself (aspect ratio within 3%)."""
+    page_w, page_h = float(page.mediabox.width), float(page.mediabox.height)
+    if page.rotation in (90, 270):
+        page_w, page_h = page_h, page_w
+    xobjects = (page.get("/Resources") or {}).get("/XObject") or {}
+    for ref in xobjects.values():
+        xobj = ref.get_object()
+        if xobj.get("/Subtype") != "/Image":
+            continue
+        width, height = int(xobj["/Width"]), int(xobj["/Height"])
+        if min(width, height) >= 500 and abs((width / height) / (page_w / page_h) - 1) <= 0.03:
+            return True
+    return False
+
+
+def is_image_only_pdf(filepath: str) -> bool:
+    """True if every page is a single full-page image, i.e. a scan, whatever text layer it carries."""
+    try:
+        pages = PdfReader(filepath).pages
+        return len(pages) > 0 and all(_page_is_full_image(page) for page in pages)
+    except Exception as e:
+        logger.warning(f"Could not inspect page images of {filepath}: {e}")
+        return False
+
+
+def has_filled_form_fields(filepath: str) -> bool:
+    """True if the PDF is a fillable form with at least one value filled in."""
+    try:
+        fields = PdfReader(filepath).get_fields() or {}
+        return any(str(f.get("/V") or "").strip() not in ("", "/Off") for f in fields.values())
+    except Exception as e:
+        logger.warning(f"Could not inspect form fields of {filepath}: {e}")
+        return False
+
+
+def _field_of(widget):
+    """Returns (name, value, field type) of a form widget, inheriting /T, /V, /FT from its parents."""
+    node, name, value, ftype = widget, None, None, None
+    while node is not None:
+        name = name or node.get("/T")
+        value = value if value is not None else node.get("/V")
+        ftype = ftype or node.get("/FT")
+        parent = node.get("/Parent")
+        node = parent.get_object() if parent is not None else None
+    return name, value, ftype
+
+
+def _text_runs(page):
+    """Returns (text, x, y) for every text run on the page, in page coordinates."""
+    runs = []
+
+    def visit(text, cm, tm, font_dict, font_size):
+        if text.strip():
+            x = tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+            y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
+            runs.append((text.strip(), x, y))
+
+    page.extract_text(visitor_text=visit)
+    return runs
+
+
+def _page_form_lines(page) -> List[str]:
+    """'Label (field): value' lines for the filled form fields on a page, in reading order."""
+    filled = []
+    for annot in page.get("/Annots") or []:
+        widget = annot.get_object()
+        if widget.get("/Subtype") != "/Widget":
+            continue
+        name, value, ftype = _field_of(widget)
+        if name is None or value is None or str(value).strip() in ("", "/Off"):
+            continue
+        x0, y0, x1, y1 = (float(v) for v in widget["/Rect"])
+        filled.append((str(name), str(value).strip(), ftype, min(x0, x1), min(y0, y1), max(y0, y1)))
+    if not filled:
+        return []
+
+    runs = _text_runs(page)
+    lines = []
+    for name, value, ftype, x, y_low, y_high in sorted(filled, key=lambda f: (-f[5], f[3])):
+        if ftype == "/Btn":
+            value = "checked" if value in ("/Yes", "/On", "/1") else value.lstrip("/")
+        left = [(run_x, text) for text, run_x, run_y in runs if y_low - 4 <= run_y <= y_high and run_x < x]
+        label = max(left)[1].rstrip(" :_") if left else ""
+        lines.append(f"{label} ({name}): {value}" if label else f"{name}: {value}")
+    return lines
+
+
+def append_form_fields(documents: List[Document], filepath: str) -> List[Document]:
+    """
+    Adds the filled-in values of fillable PDF forms to their page's text. Those values live in
+    form widgets, not in the page content, so text extraction (and OCR-skipping digital PDFs)
+    otherwise returns the blank form.
+    """
+    try:
+        pages = {doc.metadata.get("page"): doc for doc in documents}
+        for index, page in enumerate(PdfReader(filepath).pages):
+            lines = _page_form_lines(page)
+            if lines and index in pages:
+                pages[index].page_content += "\n\nFilled form fields:\n" + "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"Could not read form fields of {filepath}: {e}")
+    return documents
+
+
 class SafePyPDFLoader:
     """
     A wrapper around PyPDFLoader that handles image extraction failures gracefully.
@@ -271,15 +379,28 @@ class SafePyPDFLoader:
         # Scanned detection: if extracted text < threshold chars, PDF is scanned → OCR mandatory
         total_text_length = sum(len(doc.page_content.strip()) for doc in documents)
 
-        if total_text_length >= SCANNED_PDF_OCR_REQUIRED_CHARS:
-            # Not scanned: return as-is (no OCR), regardless of size
-            return documents
+        has_text = total_text_length >= SCANNED_PDF_OCR_REQUIRED_CHARS
+        image_only = SCANNED_PDF_IMAGE_PAGES_OCR and is_image_only_pdf(self.filepath)
 
-        # Scanned PDF: OCR is mandatory; no fallback to original documents
-        logger.info(
-            f"PDF {self.filepath} has low text content ({total_text_length} chars < {SCANNED_PDF_OCR_REQUIRED_CHARS}), "
-            "OCR required"
+        # Filled-in form values live in widgets, not in the page text. OCR renders the page with
+        # the values in place, so the text reads as the completed form.
+        filled_form = (
+            has_text and not image_only and FILLED_FORM_PDFS_OCR and has_filled_form_fields(self.filepath)
         )
+
+        if has_text and not image_only and not filled_form:
+            # Not scanned: no OCR, regardless of size
+            return append_form_fields(documents, self.filepath)
+
+        # Scanned PDF: OCR is mandatory; no fallback to original documents (a filled form has
+        # text of its own, so it falls back to that plus its field values if OCR fails)
+        if filled_form:
+            reason = "filled-in form fields"
+        elif has_text:
+            reason = "all pages are full-page images"
+        else:
+            reason = f"low text content ({total_text_length} chars < {SCANNED_PDF_OCR_REQUIRED_CHARS})"
+        logger.info(f"PDF {self.filepath}: {reason}, OCR required")
 
         if not OCR_PDF_SERVICE_URL:
             logger.error("OCR_REQUIRED_URL_MISSING OCR required but OCR_PDF_SERVICE_URL not configured")
@@ -305,6 +426,8 @@ class SafePyPDFLoader:
             logger.error(
                 f"OCR_REQUIRED_SERVICE_FAILED OCR required but failed for {self.filepath}: {ocr_error}"
             )
+            if filled_form:
+                return append_form_fields(documents, self.filepath)
             raise
 
         if not searchable_pdf_bytes:
